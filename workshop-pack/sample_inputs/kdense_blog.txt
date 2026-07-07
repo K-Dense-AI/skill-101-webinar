@@ -1,0 +1,132 @@
+One Agent Skill gives a research agent 78 public scientific and economic databases. Here is the design argument, with real token and routing benchmarks.
+
+Updated June 1, 2026
+12 min read
+
+
+One Skill, 78 Databases: Why We Didn't Build 78 Skills
+Ask a research agent "what do we know about aspirin?" and a lot has to happen quietly behind the scenes. The agent has to recognize that aspirin is a small molecule, pull its formula and weight from PubChem, check its drug-development status in ChEMBL, see how many labeled products the FDA tracks, and find the pathways it shows up in on Reactome. Four databases, four different API conventions, one coherent answer.
+
+We package that capability as a single open-source Agent Skill called database-lookup. One skill, 78 public databases, spanning chemistry, genomics, clinical data, materials science, patents, and economics. The obvious alternative, and the one several other projects have shipped, is to make each database its own skill: a pubchem skill, a chembl skill, a fred skill, and so on, 78 of them.
+
+This post is the argument for the consolidated design, and we ran three experiments to check that the argument actually holds up.
+
+What the skill looks like
+The skill is deliberately boring in structure. There is one router file, SKILL.md, and a references/ directory with one Markdown file per database:
+
+database-lookup/
+  SKILL.md                      # the router: how to pick a database
+  references/
+    pubchem.md                  # endpoints, identifiers, rate limits
+    chembl.md
+    fred.md
+    ... 75 more
+SKILL.md is a routing brain, not an API manual. It maps user intent to databases ("molecular properties go to PubChem", "somatic cancer mutations go to COSMIC or cBioPortal"), explains how to resolve identifiers between systems (a gene symbol becomes an NCBI Gene ID becomes an Ensembl ID), and flags the APIs that need POST instead of GET or a key instead of anonymous access. The per-database reference files hold the actual endpoint details, and the agent only opens one when it has decided to use that database.
+
+That structure is the whole design decision. To see why it matters, picture the alternative.
+
+Two ways to give an agent 78 databases: 78 separate skills with every description always loaded, versus one router skill that loads references on demand.
+
+The fork in the road
+With 78 separate skills, every skill advertises itself with a name and a description, and those descriptions sit in the agent's context on every single request, whether or not the user is asking about chemistry. With one skill, the agent sees a single description, reads the router only when the topic is relevant, and opens a reference file only for the database it actually picks.
+
+This is not a hypothetical fork. Google DeepMind's Science Skills take the other branch: a collection where each database or tool (AlphaGenome, AlphaFold DB, UniProt, ClinVar, and 30-plus more) is its own skill, each with its own SKILL.md and scripts. That is a genuinely good design for tool-heavy work, because a skill can ship bespoke executable code and deep per-tool instructions, and we are not claiming otherwise. But it makes a different trade than we did, and the trade shows up the moment you count tokens.
+
+That is the theory of progressive disclosure. We wanted numbers, so we measured.
+
+Experiment 1: the context tax
+Agent Skills load in layers. A skill's name and description live in the system prompt permanently. The body of SKILL.md loads only when the skill triggers. The reference files load only when the agent reads them. The permanent layer is the one you pay for on every request, so that is the one to scrutinize.
+
+We tokenized the real skill with tiktoken (the o200k_base encoding used by current GPT-class models) and compared the always-on cost of the two designs. For the 78-skill world, we generated a realistic name and one-line description for each database from its actual "what it covers" summary, about 43 tokens per skill. That length is the one assumption that matters here: the always-on total scales linearly with it, so leaner descriptions would shrink the gap and richer ones (the kind a careful skill author actually writes) would widen it.
+
+Always-on context is 13.9x larger with 78 skills; 93 percent of the skill's knowledge stays out of context until a database is selected.
+
+The results:
+
+Quantity	One consolidated skill	78 separate skills
+Always-on context (every request)	242 tokens	3,358 tokens
+Loaded when the skill triggers	7,474 tokens (router)	~1,286 tokens (one skill body)
+Reference corpus kept out of context until needed	100,298 tokens	100,298 tokens
+The headline is the first row. Splitting into 78 skills costs 13.9x more always-on context, paid on every turn of every conversation, most of which has nothing to do with databases. The full reference corpus is about 100,000 tokens, and 93 percent of it never enters context until the agent commits to a specific database. The consolidated router is larger than any single per-database skill body, but you only pay that cost once the topic is actually relevant, which is exactly the trade you want.
+
+Experiment 2: does one big skill route worse?
+The strongest objection to consolidation is routing quality. If one skill has to choose among 78 databases, maybe it chooses worse than 78 narrowly-scoped skills that each scream "use me for genes." So we built a benchmark: 64 labeled natural-language queries (49 single-database, 15 cross-domain), each tagged with the database (or databases) that correctly answers it.
+
+We ran each query two ways against five models spanning vendors and tiers: openai/gpt-5.5, anthropic/claude-opus-4.8, google/gemini-3.5-flash, x-ai/grok-4.3, and nvidia/nemotron-3-super-120b-a12b:
+
+Consolidated: the model gets the skill's selection guide plus the database catalog.
+Separate skills: the model gets only the 78 terse skill descriptions, no guide.
+A note on what "description" means here. Under progressive disclosure, the only thing an installed skill keeps in context is its name plus a one-line description; the full SKILL.md body loads when the skill triggers, and reference files load only after the agent has already picked a database. So at routing time, what an agent sees for 78 separate skills really is just 78 one-liners, which is exactly what the separate-skills condition provides. Both conditions draw from the identical catalog, so grading is identical and the only variable is whether the cross-database selection guide is present (a guide that the separate-skills architecture has nowhere to put).
+
+Across five models, single-database routing scores 96 to 100 percent either way; on cross-domain queries the guide-less approach falls to 89 percent for gpt-5.5, 92 percent for gemini-3.5-flash, and 63 percent for nemotron-3-super, while the consolidated guide holds every model at 100 percent.
+
+The honest finding has two parts. On single-database lookups, every model routes near-perfectly even from bare descriptions: 96 to 100 percent either way, across all five. A selection guide buys essentially nothing there.
+
+The story changes on the 15 cross-domain queries, and it depends on the model. With the consolidated guide, all five models hit 100 percent. Without it, the picture fractures: claude-opus-4.8 and grok-4.3 still scored 100 percent, but gpt-5.5 fell to 89 percent, gemini-3.5-flash to 92 percent, and nemotron-3-super all the way to 63 percent. The guide's payoff is real but uneven, and it is largest for the models that need it most (it lifted nemotron-3-super by 37 points).
+
+The failures share a signature: collapsing a multi-source request down to the single most obvious source. The clearest pattern is materials queries. Asked about gallium nitride, titanium dioxide, or LiFePO4 without the guide, gpt-5.5, gemini-3.5-flash, and nemotron-3-super all reached for the famous Materials Project and dropped the COD crystal-structure database that completes the answer. The same thing happened in economics, where "a US economic overview" collapsed to FRED alone on both gpt-5.5 and nemotron-3-super, skipping BLS (labor statistics) and BEA (national accounts), and in genomics, where nemotron-3-super lost the core NCBI Gene and UniProt sources on "everything about TP53" and dropped ChEMBL and Reactome entirely when asked to map imatinib to its target pathways. The consolidated skill encodes these multi-database recipes ("a material" means Materials Project plus COD, "a US economic overview" means FRED plus BLS plus BEA) in one place. Seventy-eight independent skill descriptions cannot, because no single description knows what the others are for.
+
+Two things are worth being honest about. First, the routing gap is model-dependent rather than universal: a selection guide is insurance whose payoff is large for some models (nemotron-3-super, gpt-5.5, gemini-3.5-flash) and near zero for others (claude-opus-4.8, grok-4.3). You cannot predict in advance which model an agent will use, so guaranteeing completeness across all of them is itself the argument. Second, on open-ended "everything about X" prompts the models already fan out widely on their own (claude-opus-4.8 reached for a dozen-plus databases on "everything about BRCA1"), so the guide is shaping completeness, not just breadth. Either way, the durable, model-independent win is the context cost from Experiment 1.
+
+And a few caveats on how to read these numbers, because they bound what the experiment can claim. The cross-domain answer key is itself drawn from the skill's selection guide, so the consolidated arm being handed that guide is part of why it scores 100 percent; the informative signal is how far the guide-less arm falls, not the guided arm's ceiling. With only 15 cross-domain queries the per-model figures are directional rather than precise (the difference between, say, gpt-5.5 at 89 percent and gemini-3.5-flash at 92 percent is a single query), so do not over-read the ranking among the imperfect models. And the benchmark is single-shot at temperature 0: a real agent that can open a reference file, notice a gap, and re-query would likely recover some of these misses, which means the live cost of a missing guide is probably smaller than the one-shot numbers suggest. What survives all of that is the shape of the result, not the decimals: bare descriptions already solve single-database lookups, and a shared guide is what reliably reconstructs the multi-database recipes that isolated descriptions cannot encode.
+
+Experiment 3: and it actually works
+A design argument is worthless if the underlying APIs do not respond. We hit a representative keyless endpoint for 30 of the databases in parallel and checked that each returned valid JSON.
+
+Attempted:        30 databases
+Valid JSON:       30 / 30  (100%)
+Median latency:   416 ms
+P90 latency:      1,417 ms
+(This sweep covers the anonymous, GET-friendly endpoints. Key-gated databases like FRED, BEA, and Materials Project, and POST-only GraphQL endpoints like Open Targets and gnomAD, are handled by the skill but were out of scope for a keyless sweep.)
+
+And the aspirin question from the opening is not hypothetical. Here is the real fan-out, four databases queried, identifiers resolved, results merged:
+
+# 1. PubChem: identity and physical properties
+curl "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/aspirin/property/MolecularFormula,MolecularWeight,IUPACName/JSON"
+# 2. ChEMBL: drug-development status
+curl "https://www.ebi.ac.uk/chembl/api/data/molecule/CHEMBL25.json"
+# 3. FDA: labeled products
+curl "https://api.fda.gov/drug/label.json?search=openfda.generic_name:aspirin&limit=1"
+# 4. Reactome: pathways
+curl "https://reactome.org/ContentService/search/query?query=aspirin"
+Merged into one answer:
+
+{
+  "pubchem": { "CID": 2244, "MolecularFormula": "C9H8O4", "MolecularWeight": "180.16", "IUPACName": "2-acetyloxybenzoic acid" },
+  "chembl":  { "chembl_id": "CHEMBL25", "max_phase": 4, "first_approval": 1950, "oral": true },
+  "fda":     { "total_labels": 721, "route": "ORAL", "purpose": "Pain reliever" },
+  "reactome":{ "pathway": "Aspirin ADME", "id": "R-HSA-9749641" }
+}
+One natural-language question, four APIs with four different conventions, one structured answer. That is the orchestration a consolidated skill makes natural and that 78 disconnected skills make awkward.
+
+The cost compounds when an agent runs many skills
+Here is the part that matters most for real science agents, and where our approach pulls ahead of the one-skill-per-tool model. A serious research agent does not load only database skills. It also has skills for statistics, for plotting, for literature search, for writing up results, for talking to a lab notebook. Every one of those skills spends from the same always-on context budget. Database access is supposed to be one capability among many, not the thing that eats the budget.
+
+Compare the two designs at the collection level. The Science Skills collection advertises "AlphaGenome, AFDB, UniProt and 30-plus other databases and tools," each as its own always-on skill. Our Experiment 1 measured that turning 78 databases into 78 separate skills costs roughly 13.9x more always-on context than consolidating them; because the premium scales with the number of skills, even a 30-tool collection still pays on the order of 5x. Either way that tax is charged on every turn, before the agent has loaded a single non-database skill. With database-lookup, broad coverage of 78 databases occupies exactly one always-on slot, which leaves the rest of the context window for the other skills the agent actually needs to finish the job.
+
+To be clear about when each design wins: if a tool needs substantial bespoke code (a typed client, a non-trivial auth dance, heavy local computation), a dedicated skill with its own scripts is the right call, and that is exactly the niche the Science Skills collection fills well. But for the long tail of REST APIs that differ only in their URLs and identifiers, which is what most public scientific and economic databases are, paying a separate always-on skill for each one is the expensive way to buy breadth. Consolidation is how you give an agent access to everything without crowding out everything else.
+
+The reasons that do not show up in a benchmark
+Five more arguments are harder to chart but matter just as much.
+
+A long, overlapping skill list is exactly what selection is worst at. Picking a skill is a classification problem over every description in context, and that problem gets harder, not easier, as the list grows, and harder still when the candidates overlap. Scientific databases overlap constantly: PubChem and ChEMBL both cover small molecules, NCBI Gene and Ensembl and UniProt all describe the same gene from different angles, ClinVar and dbSNP and gnomAD all return variants, COSMIC and cBioPortal and Open Targets all touch cancer mutations. Turn each into an independent skill that advertises itself in isolation and the model has to disambiguate near-duplicates with nothing telling it how they differ or when to use them together, so it mis-triggers, fires two redundant skills, or stalls. This is also a harness reality, not only a model one: most agent frameworks degrade as the number of registered skills climbs into the dozens, which is why their own guidance is to keep the active set small. A consolidated router collapses 78 competing advertisements into one guided decision where the overlaps are reconciled in plain language ("for a small molecule start with PubChem; reach for ChEMBL when you need bioactivity or development status"). The model makes one disambiguation it can actually reason about instead of seventy-eight it cannot.
+
+Shared infrastructure, written once. Loading an API key from the environment then falling back to .env, retrying on a 429, paginating with offsets versus cursors versus page numbers, handling the handful of POST-only GraphQL endpoints, recovering from a bad identifier by converting formats: these are written once in the router and apply to all 78 databases. In an 78-skill world they are either duplicated 78 times or, more realistically, implemented inconsistently and forgotten in half of them.
+
+Extending it is a pull request, not a release. Adding a database is one new file in references/ and one row in the selection guide. No new skill to register, no new description competing for the agent's attention, no install step. The capability grows; the always-on footprint barely moves.
+
+Graceful degradation, because the skill knows the alternatives. Public databases go down, rate-limit you, or sit behind a paywall. A consolidated router can reroute, because it can see the whole map: it knows that if DrugBank needs a paid license you can usually answer the same question with ChEMBL plus PubChem plus OpenFDA, that COSMIC's cancer mutations have a free path through Open Targets, and that a 429 from one source means wait-and-retry or fall back to a sibling listed in the "also consider" column. Seventy-eight isolated skills cannot fall back to each other, because no skill knows that the others exist. Isolation does not just cost routing accuracy; it removes the agent's ability to recover.
+
+One unit to trust, audit, and pin. Every skill description an agent installs is untrusted text that sits in its context and can steer behavior, so the number of skills is also the size of your review-and-supply-chain surface. One skill is one file tree to security-review, one version to pin, one provenance to vouch for. Reaching the same database coverage through 30 or 78 separately authored skills means 30 or 78 descriptions to vet, keep updated, and trust not to drift or be tampered with, multiplying both the audit burden and the prompt-injection surface for no functional gain.
+
+The trade-offs we accept
+This is not free. The router file is larger than any single-database skill would be, so when the skill triggers, the agent reads more up front (Experiment 1 quantified this at about 7,500 tokens). The design also leans on the model to actually open the right reference file rather than guessing endpoints from memory, which is why the router keeps the identifier tables and "also consider" hints close at hand. And as the cross-domain results showed, a good selection guide nudges the agent toward thoroughness, which is the right default for research but does spend extra calls.
+
+We think those are the right trades. The cost is paid only when the capability is in use; the savings are paid back on every request.
+
+The takeaway
+Organize skills around a capability, not around an API surface. "Look up a public database" is one capability, even though it touches 78 endpoints. Splitting it into 78 skills optimizes for the wrong thing: it taxes every request with descriptions the agent rarely needs, scatters shared logic, and strips out exactly the cross-database routing knowledge that makes the capability useful. Consolidation keeps the context lean, the routing smart, and the maintenance sane, and the numbers back all three.
+
+The database-lookup skill is open source and part of our Scientific Agent Skills collection. You can read the router, the 78 reference files, and the selection guide that powered these experiments, and use them in your own agents, at github.com/K-Dense-AI/scientific-agent-skills.
+
+Methodology: token counts use tiktoken with the o200k_base encoding. The routing benchmark ran 64 labeled queries per condition (49 single-database, 15 cross-domain) against openai/gpt-5.5, anthropic/claude-opus-4.8, google/gemini-3.5-flash, x-ai/grok-4.3, and nvidia/nemotron-3-super-120b-a12b at temperature 0, scoring whether the selected databases covered the correct source(s). The coverage sweep queried 30 keyless endpoints in parallel and validated JSON responses. Numbers reflect runs on 2026-06-01 and will drift as the skill and the underlying APIs evolve.

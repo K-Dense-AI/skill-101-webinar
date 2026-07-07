@@ -1,0 +1,10 @@
+sample_id,condition,replicate,salt_mM,yield_ng_per_uL,a260_280,viability_pct
+S01,control,1,100,180.4,1.88,92.1
+S02,control,2,100,176.9,1.90,91.4
+S03,control,3,100,182.2,1.89,93.0
+S04,low_salt,1,50,210.7,1.92,95.3
+S05,low_salt,2,50,205.1,1.91,94.8
+S06,low_salt,3,50,213.9,1.93,96.0
+S07,high_salt,1,200,141.3,1.84,88.7
+S08,high_salt,2,200,138.0,1.83,87.9
+S09,high_salt,3,200,144.6,1.85,89.2
