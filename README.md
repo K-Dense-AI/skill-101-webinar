@@ -3,6 +3,8 @@
 Materials for the **K-Dense webinar** — *Skills 101: Build Your Own Scientific Agent Skill*  
 **Event by K-Dense Inc.** · Wed, Jul 8, 2026, 1:30 PM – 3:00 PM
 
+> 🎬 **Watch the recording:** [Skills 101: Build Your Own Scientific Agent Skill](https://youtu.be/lVZbHiwzMEg) — the full webinar, if you missed it or want to follow along at your own pace.
+
 ## Downloads
 
 | File | Description |
@@ -19,4 +21,4 @@ Materials for the **K-Dense webinar** — *Skills 101: Build Your Own Scientific
 3. Copy the [workshop-pack/](./workshop-pack/) folder into `~/Desktop/skills-workshop` (or download and unzip **workshop-pack.zip**)
 4. Follow the guide during the webinar
 
-Questions? [k-dense.ai](https://k-dai)
+Questions? [k-dense.ai](https://www.k-dense.ai)
